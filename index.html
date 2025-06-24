@@ -456,9 +456,14 @@
             toggleRecording() {
                 if (this.recordingMode !== 'on-demand') return;
                 
+                if (!this.apiKey) {
+                    this.showError('Please enter your OpenAI API key first');
+                    return;
+                }
+                
                 if (this.isRecording) {
                     this.stopRecording();
-                } else if (this.apiKey) {
+                } else {
                     this.startRecording();
                 }
             }
@@ -632,6 +637,11 @@
                     console.error('Error accessing microphone:', error);
                     this.showError(`Failed to access microphone: ${error.message}`);
                     this.updateStatus('Error', 'error');
+                    
+                    // Reset record button state if recording failed to start
+                    if (this.recordingMode === 'on-demand') {
+                        this.updateRecordButtonState();
+                    }
                 }
             }
 
