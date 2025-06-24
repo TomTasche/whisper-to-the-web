@@ -87,6 +87,22 @@
             }
         }
 
+        .audio-level {
+            width: 100px;
+            height: 6px;
+            background-color: #333;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-left: 1rem;
+        }
+
+        .audio-level-bar {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.1s ease;
+        }
+
         .api-key-section {
             display: flex;
             align-items: center;
@@ -201,9 +217,10 @@
             display: none;
         }
 
-        .current-segment {
-            color: #4CAF50;
-            font-style: italic;
+        .debug-info {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 0.5rem;
         }
 
         @media (max-width: 768px) {
@@ -236,6 +253,9 @@
             <div class="status-indicator">
                 <div class="status-dot" id="statusDot"></div>
                 <span id="statusText">Inactive</span>
+                <div class="audio-level">
+                    <div class="audio-level-bar" id="audioLevelBar"></div>
+                </div>
             </div>
             <div class="api-key-section">
                 <input 
@@ -269,7 +289,12 @@
                 this.audioChunks = [];
                 this.isRecording = false;
                 this.transcriptionHistory = '';
-                this.recordingInterval = null;
+                this.audioContext = null;
+                this.analyser = null;
+                this.microphone = null;
+                this.silenceDetectionTimeout = null;
+                this.hasSpokenInChunk = false;
+                this.chunkStartTime = null;
                 
                 this.initializeElements();
                 this.setupEventListeners();
@@ -284,6 +309,7 @@
                 this.clearBtn = document.getElementById('clearBtn');
                 this.transcriptionContent = document.getElementById('transcriptionContent');
                 this.errorMessage = document.getElementById('errorMessage');
+                this.audioLevelBar = document.getElementById('audioLevelBar');
 
                 if (this.apiKey) {
                     this.apiKeyInput.value = this.apiKey;
@@ -348,10 +374,29 @@
                 if (this.isRecording || !this.apiKey) return;
 
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        } 
+                    });
+                    
+                    // Setup audio context for level monitoring
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    this.analyser = this.audioContext.createAnalyser();
+                    this.microphone = this.audioContext.createMediaStreamSource(stream);
+                    this.microphone.connect(this.analyser);
+                    this.analyser.fftSize = 256;
+                    
+                    // Monitor audio levels
+                    this.monitorAudioLevel();
+
+                    // Try to use a more compatible format
+                    const mimeType = this.getSupportedMimeType();
                     
                     this.mediaRecorder = new MediaRecorder(stream, {
-                        mimeType: 'audio/webm'
+                        mimeType: mimeType
                     });
 
                     this.mediaRecorder.ondataavailable = (event) => {
@@ -361,32 +406,43 @@
                     };
 
                     this.mediaRecorder.onstop = async () => {
-                        if (this.audioChunks.length > 0) {
-                            const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                        if (this.audioChunks.length > 0 && this.hasSpokenInChunk) {
+                            const audioBlob = new Blob(this.audioChunks, { type: mimeType });
                             this.audioChunks = [];
-                            await this.transcribeAudio(audioBlob);
+                            
+                            // Only transcribe if the chunk is long enough
+                            const chunkDuration = Date.now() - this.chunkStartTime;
+                            if (chunkDuration > 1000) { // At least 1 second
+                                await this.transcribeAudio(audioBlob, mimeType);
+                            }
+                        } else {
+                            this.audioChunks = [];
                         }
+                        this.hasSpokenInChunk = false;
                     };
 
                     this.isRecording = true;
                     this.mediaRecorder.start();
+                    this.chunkStartTime = Date.now();
                     this.updateStatus('Recording', 'active');
                     
-                    // Record in 5-second chunks for real-time transcription
+                    // Record in 10-second chunks for better context
                     this.recordingInterval = setInterval(() => {
                         if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
                             this.mediaRecorder.stop();
                             setTimeout(() => {
                                 if (this.isRecording && this.mediaRecorder) {
                                     this.audioChunks = [];
+                                    this.hasSpokenInChunk = false;
+                                    this.chunkStartTime = Date.now();
                                     this.mediaRecorder.start();
                                 }
                             }, 100);
                         }
-                    }, 5000);
+                    }, 10000);
 
                     if (this.transcriptionHistory === '') {
-                        this.transcriptionContent.textContent = 'Listening...';
+                        this.transcriptionContent.textContent = 'Listening... (Speak clearly and wait a moment for transcription)';
                     }
 
                 } catch (error) {
@@ -394,6 +450,50 @@
                     this.showError('Failed to access microphone. Please check permissions.');
                     this.updateStatus('Error', 'error');
                 }
+            }
+
+            getSupportedMimeType() {
+                const types = [
+                    'audio/webm;codecs=opus',
+                    'audio/webm',
+                    'audio/ogg;codecs=opus',
+                    'audio/mp4',
+                ];
+                
+                for (const type of types) {
+                    if (MediaRecorder.isTypeSupported(type)) {
+                        console.log('Using mime type:', type);
+                        return type;
+                    }
+                }
+                
+                return 'audio/webm'; // fallback
+            }
+
+            monitorAudioLevel() {
+                if (!this.analyser || !this.isRecording) return;
+
+                const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+                this.analyser.getByteFrequencyData(dataArray);
+                
+                // Calculate average volume
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i];
+                }
+                const average = sum / dataArray.length;
+                
+                // Update visual indicator
+                const percentage = Math.min(100, (average / 128) * 100);
+                this.audioLevelBar.style.width = percentage + '%';
+                
+                // Detect if there's significant audio
+                if (average > 20) { // Threshold for voice activity
+                    this.hasSpokenInChunk = true;
+                }
+                
+                // Continue monitoring
+                requestAnimationFrame(() => this.monitorAudioLevel());
             }
 
             stopRecording() {
@@ -411,15 +511,27 @@
                     this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
                 }
 
+                if (this.audioContext) {
+                    this.audioContext.close();
+                    this.audioContext = null;
+                }
+
+                this.audioLevelBar.style.width = '0%';
                 this.updateStatus('Stopped', 'inactive');
             }
 
-            async transcribeAudio(audioBlob) {
+            async transcribeAudio(audioBlob, mimeType) {
                 try {
+                    // Convert to a format Whisper definitely supports
+                    const audioFile = new File([audioBlob], 'audio.webm', { 
+                        type: mimeType 
+                    });
+
                     const formData = new FormData();
-                    formData.append('file', audioBlob, 'audio.webm');
+                    formData.append('file', audioFile);
                     formData.append('model', 'whisper-1');
-                    formData.append('response_format', 'text');
+                    formData.append('response_format', 'json');
+                    formData.append('language', 'en'); // Specify language to improve accuracy
 
                     const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
                         method: 'POST',
@@ -434,9 +546,13 @@
                         throw new Error(error.error?.message || 'Transcription failed');
                     }
 
-                    const transcription = await response.text();
+                    const result = await response.json();
+                    const transcription = result.text;
                     
-                    if (transcription.trim()) {
+                    // Filter out common noise transcriptions
+                    if (transcription && 
+                        transcription.trim() && 
+                        !transcription.match(/^(you|You|Yeah|yeah|Hmm|hmm|Mm|mm|Um|um|Uh|uh)\.?$/)) {
                         this.addTranscription(transcription);
                     }
 
@@ -459,7 +575,7 @@
 
             clearTranscription() {
                 this.transcriptionHistory = '';
-                this.transcriptionContent.textContent = this.isRecording ? 'Listening...' : 'Cleared. Start recording to see new transcriptions.';
+                this.transcriptionContent.textContent = this.isRecording ? 'Listening... (Speak clearly and wait a moment for transcription)' : 'Cleared. Start recording to see new transcriptions.';
             }
 
             updateStatus(text, state) {
