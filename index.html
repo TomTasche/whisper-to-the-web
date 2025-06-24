@@ -367,11 +367,7 @@
                 // Tab visibility
                 document.addEventListener('visibilitychange', () => {
                     if (document.hidden) {
-                        // Clear buffer immediately to avoid speech artifacts
-                        this.audioBuffer = [];
-                        this.speechStartTime = null;
-                        this.consecutiveSilentFrames = 0;
-                        this.stopRecording();
+                        this.clearAudioBufferAndStop();
                     } else if (this.apiKey) {
                         if (this.isRecording && !this.monitoringStarted) {
                             this.monitoringStarted = true;
@@ -389,12 +385,16 @@
                 });
 
                 window.addEventListener('blur', () => {
-                    // Clear buffer immediately to avoid speech artifacts
-                    this.audioBuffer = [];
-                    this.speechStartTime = null;
-                    this.consecutiveSilentFrames = 0;
-                    this.stopRecording();
+                    this.clearAudioBufferAndStop();
                 });
+            }
+
+            clearAudioBufferAndStop() {
+                // Clear buffer immediately to avoid speech artifacts
+                this.audioBuffer = [];
+                this.speechStartTime = null;
+                this.consecutiveSilentFrames = 0;
+                this.stopRecording();
             }
 
             toggleDebug() {
