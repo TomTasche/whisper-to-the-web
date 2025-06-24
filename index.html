@@ -301,7 +301,6 @@
             constructor() {
                 this.apiKey = localStorage.getItem('openai_api_key') || '';
                 this.mediaRecorder = null;
-                this.audioChunks = [];
                 this.isRecording = false;
                 this.transcriptionHistory = '';
                 this.audioContext = null;
@@ -309,18 +308,19 @@
                 this.microphone = null;
                 this.scriptProcessor = null;
                 this.hasSpokenInChunk = false;
-                this.chunkStartTime = null;
                 this.debugMode = false;
                 this.audioStream = null;
                 
-                // Continuous recording variables
-                this.continuousAudioData = [];
-                this.lastTranscriptionEndTime = 0;
-                this.overlapDuration = 2000; // 2 seconds overlap
-                this.chunkDuration = 10000; // 10 seconds chunks
-                this.isSpeaking = false;
-                this.lastSpeechTime = 0;
-                this.pendingTranscription = '';
+                // Audio recording settings
+                this.sampleRate = 16000; // Whisper works best with 16kHz
+                this.recordingDuration = 30000; // 30 seconds max per chunk
+                this.silenceThreshold = 0.01;
+                this.silenceDuration = 2000; // 2 seconds of silence to stop
+                this.lastSoundTime = Date.now();
+                
+                // Buffer for continuous recording
+                this.audioBuffer = [];
+                this.isProcessing = false;
                 
                 this.initializeElements();
                 this.setupEventListeners();
@@ -417,82 +417,75 @@
                 if (this.isRecording || !this.apiKey) return;
 
                 try {
-                    // Request microphone
+                    // Request microphone with specific sample rate
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
-                            autoGainControl: true
+                            autoGainControl: true,
+                            sampleRate: this.sampleRate
                         } 
                     });
                     
                     this.audioStream = stream;
                     
-                    // Setup audio context for level monitoring
-                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    // Setup audio context
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: this.sampleRate
+                    });
                     
-                    // Resume if suspended
                     if (this.audioContext.state === 'suspended') {
                         await this.audioContext.resume();
                     }
                     
-                    // Create analyser and script processor
+                    // Create nodes
                     this.analyser = this.audioContext.createAnalyser();
-                    this.analyser.fftSize = 1024;
-                    this.analyser.smoothingTimeConstant = 0.3;
+                    this.analyser.fftSize = 2048;
+                    this.analyser.smoothingTimeConstant = 0.8;
                     
-                    // Create script processor for processing
-                    this.scriptProcessor = this.audioContext.createScriptProcessor(2048, 1, 1);
+                    this.scriptProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
                     
-                    // Connect microphone -> analyser -> script processor -> destination
                     this.microphone = this.audioContext.createMediaStreamSource(stream);
                     this.microphone.connect(this.analyser);
                     this.analyser.connect(this.scriptProcessor);
                     this.scriptProcessor.connect(this.audioContext.destination);
                     
-                    // Add script processor event listener to ensure processing
-                    this.scriptProcessor.onaudioprocess = () => {
-                        // This ensures the audio pipeline is active
-                    };
-                    
-                    // Small delay to ensure everything is connected
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    
-                    // Start monitoring
-                    this.monitorAudioLevel();
-
-                    // Setup media recorder
-                    const mimeType = 'audio/webm';
-                    
-                    this.updateDebugInfo(`Starting recording\nMime type: ${mimeType}\nAudio Context State: ${this.audioContext.state}`);
-                    
-                    this.mediaRecorder = new MediaRecorder(stream, {
-                        mimeType: mimeType
-                    });
-
-                    this.mediaRecorder.ondataavailable = (event) => {
-                        if (event.data.size > 0) {
-                            this.continuousAudioData.push({
-                                data: event.data,
-                                timestamp: Date.now()
-                            });
+                    // Process audio data
+                    this.scriptProcessor.onaudioprocess = (event) => {
+                        if (!this.isRecording) return;
+                        
+                        const inputData = event.inputBuffer.getChannelData(0);
+                        const audioData = new Float32Array(inputData);
+                        
+                        // Add to buffer
+                        this.audioBuffer.push(audioData);
+                        
+                        // Detect voice activity
+                        const rms = this.calculateRMS(audioData);
+                        if (rms > this.silenceThreshold) {
+                            this.lastSoundTime = Date.now();
+                            this.hasSpokenInChunk = true;
+                        }
+                        
+                        // Check if we should process
+                        const now = Date.now();
+                        const bufferDuration = (this.audioBuffer.length * 4096) / this.sampleRate * 1000;
+                        const silenceDuration = now - this.lastSoundTime;
+                        
+                        if (!this.isProcessing && this.hasSpokenInChunk && 
+                            (bufferDuration > this.recordingDuration || silenceDuration > this.silenceDuration)) {
+                            this.processAudioBuffer();
                         }
                     };
-
-                    this.mediaRecorder.onerror = (event) => {
-                        console.error('MediaRecorder error:', event);
-                        this.showError(`Recording error: ${event.error}`);
-                    };
-
+                    
+                    // Start monitoring levels
+                    this.monitorAudioLevel();
+                    
                     this.isRecording = true;
-                    this.mediaRecorder.start(100); // Collect data every 100ms
                     this.updateStatus('Recording', 'active');
                     
-                    // Start processing loop
-                    this.startProcessingLoop(mimeType);
-
                     if (this.transcriptionHistory === '') {
-                        this.transcriptionContent.textContent = 'Listening... (Speak naturally - I\'ll handle long sentences)';
+                        this.transcriptionContent.textContent = 'Listening...';
                     }
 
                 } catch (error) {
@@ -502,103 +495,104 @@
                 }
             }
 
-            startProcessingLoop(mimeType) {
-                this.processingInterval = setInterval(async () => {
-                    if (!this.isRecording) return;
-
-                    // Check if we have enough audio data
-                    if (this.continuousAudioData.length === 0) return;
-
-                    const now = Date.now();
-                    const oldestTimestamp = this.continuousAudioData[0].timestamp;
-                    
-                    // Process if we have enough data OR if there's been silence after speech
-                    const hasEnoughData = (now - oldestTimestamp) >= this.chunkDuration;
-                    const hasSilenceAfterSpeech = !this.isSpeaking && this.hasSpokenInChunk && 
-                                                   (now - this.lastSpeechTime) > 1500;
-
-                    if (hasEnoughData || hasSilenceAfterSpeech) {
-                        await this.processAudioChunk(mimeType);
-                    }
-                }, 1000); // Check every second
+            calculateRMS(data) {
+                let sum = 0;
+                for (let i = 0; i < data.length; i++) {
+                    sum += data[i] * data[i];
+                }
+                return Math.sqrt(sum / data.length);
             }
 
-            async processAudioChunk(mimeType) {
-                if (this.continuousAudioData.length === 0) return;
-
-                // Calculate overlap point
-                const now = Date.now();
-                const overlapStartTime = this.lastTranscriptionEndTime - this.overlapDuration;
+            async processAudioBuffer() {
+                if (this.audioBuffer.length === 0 || this.isProcessing) return;
                 
-                // Get chunks for transcription
-                const chunksToProcess = [];
-                let processEndTime = now;
+                this.isProcessing = true;
                 
-                for (const chunk of this.continuousAudioData) {
-                    if (chunk.timestamp >= overlapStartTime) {
-                        chunksToProcess.push(chunk.data);
-                    }
-                    processEndTime = chunk.timestamp;
-                }
-
-                if (chunksToProcess.length === 0) return;
-
-                // Create blob from chunks with proper mime type
-                const audioBlob = new Blob(chunksToProcess, { type: mimeType });
-                
-                this.updateDebugInfo(
-                    `Processing chunk: ${(audioBlob.size / 1024).toFixed(1)} KB\n` +
-                    `Type: ${audioBlob.type}\n` +
-                    `Chunks: ${chunksToProcess.length}\n` +
-                    `Duration: ${((processEndTime - (overlapStartTime || this.continuousAudioData[0].timestamp)) / 1000).toFixed(1)}s`
-                );
-
-                // Transcribe with context
-                const transcription = await this.transcribeAudioWithContext(audioBlob);
-                
-                if (transcription) {
-                    // Handle the transcription with overlap detection
-                    this.handleOverlappingTranscription(transcription, overlapStartTime > 0);
-                    this.lastTranscriptionEndTime = processEndTime;
-                }
-
-                // Clean up old audio data
-                this.continuousAudioData = this.continuousAudioData.filter(
-                    chunk => chunk.timestamp > processEndTime - this.overlapDuration
-                );
-                
-                this.hasSpokenInChunk = false;
-            }
-
-            async transcribeAudioWithContext(audioBlob) {
                 try {
-                    // Create a properly named file with .webm extension
-                    const audioFile = new File([audioBlob], 'audio.webm', { 
-                        type: 'audio/webm',
+                    // Combine all audio chunks
+                    const totalLength = this.audioBuffer.reduce((acc, chunk) => acc + chunk.length, 0);
+                    const combinedBuffer = new Float32Array(totalLength);
+                    let offset = 0;
+                    
+                    for (const chunk of this.audioBuffer) {
+                        combinedBuffer.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    
+                    // Clear buffer
+                    this.audioBuffer = [];
+                    this.hasSpokenInChunk = false;
+                    
+                    // Convert to WAV
+                    const wavBlob = this.createWAVBlob(combinedBuffer);
+                    
+                    this.updateDebugInfo(
+                        `Processing audio:\n` +
+                        `Duration: ${(totalLength / this.sampleRate).toFixed(1)}s\n` +
+                        `Size: ${(wavBlob.size / 1024).toFixed(1)} KB\n` +
+                        `Format: WAV (${this.sampleRate}Hz)`
+                    );
+                    
+                    // Transcribe
+                    await this.transcribeAudio(wavBlob);
+                    
+                } catch (error) {
+                    console.error('Error processing audio:', error);
+                    this.showError(`Processing error: ${error.message}`);
+                } finally {
+                    this.isProcessing = false;
+                }
+            }
+
+            createWAVBlob(audioData) {
+                const length = audioData.length;
+                const arrayBuffer = new ArrayBuffer(44 + length * 2);
+                const view = new DataView(arrayBuffer);
+                
+                // WAV header
+                const writeString = (offset, string) => {
+                    for (let i = 0; i < string.length; i++) {
+                        view.setUint8(offset + i, string.charCodeAt(i));
+                    }
+                };
+                
+                writeString(0, 'RIFF');
+                view.setUint32(4, 36 + length * 2, true);
+                writeString(8, 'WAVE');
+                writeString(12, 'fmt ');
+                view.setUint32(16, 16, true); // fmt chunk size
+                view.setUint16(20, 1, true); // PCM format
+                view.setUint16(22, 1, true); // Mono
+                view.setUint32(24, this.sampleRate, true);
+                view.setUint32(28, this.sampleRate * 2, true); // byte rate
+                view.setUint16(32, 2, true); // block align
+                view.setUint16(34, 16, true); // bits per sample
+                writeString(36, 'data');
+                view.setUint32(40, length * 2, true);
+                
+                // Convert float32 to int16
+                let offset = 44;
+                for (let i = 0; i < length; i++) {
+                    const sample = Math.max(-1, Math.min(1, audioData[i]));
+                    view.setInt16(offset, sample * 0x7FFF, true);
+                    offset += 2;
+                }
+                
+                return new Blob([arrayBuffer], { type: 'audio/wav' });
+            }
+
+            async transcribeAudio(audioBlob) {
+                try {
+                    const audioFile = new File([audioBlob], 'audio.wav', { 
+                        type: 'audio/wav',
                         lastModified: Date.now()
                     });
 
                     const formData = new FormData();
                     formData.append('file', audioFile);
                     formData.append('model', 'whisper-1');
-                    formData.append('response_format', 'verbose_json');
+                    formData.append('response_format', 'json');
                     formData.append('language', 'en');
-                    
-                    // Add prompt for context if we have pending transcription
-                    if (this.pendingTranscription) {
-                        // Use last 50 words as context
-                        const words = this.pendingTranscription.split(' ');
-                        const contextWords = words.slice(-50).join(' ');
-                        formData.append('prompt', contextWords);
-                    }
-
-                    this.updateDebugInfo(
-                        `Sending to Whisper API...\n` +
-                        `File: ${audioFile.name}\n` +
-                        `Size: ${(audioFile.size / 1024).toFixed(1)} KB\n` +
-                        `Type: ${audioFile.type}\n` +
-                        `Context: ${this.pendingTranscription ? 'Yes' : 'No'}`
-                    );
 
                     const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
                         method: 'POST',
@@ -614,68 +608,18 @@
                     }
 
                     const result = await response.json();
-                    return result;
+                    const transcription = result.text;
+                    
+                    if (transcription && transcription.trim() && 
+                        !transcription.match(/^(you|You|Yeah|yeah|Hmm|hmm|Mm|mm|Um|um|Uh|uh|\[.*\]|\(.*\))\.?$/)) {
+                        this.addTranscription(transcription);
+                    }
 
                 } catch (error) {
                     console.error('Transcription error:', error);
                     this.showError(`Transcription error: ${error.message}`);
                     this.updateDebugInfo(`Error: ${error.message}`);
-                    return null;
                 }
-            }
-
-            handleOverlappingTranscription(result, hasOverlap) {
-                const transcription = result.text;
-                
-                if (!transcription || transcription.trim().length < 2) return;
-
-                // Filter out noise
-                if (transcription.match(/^(you|You|Yeah|yeah|Hmm|hmm|Mm|mm|Um|um|Uh|uh|\.)\.?$/)) return;
-
-                if (hasOverlap && this.pendingTranscription) {
-                    // Find the overlap point
-                    const overlap = this.findOverlapPoint(this.pendingTranscription, transcription);
-                    
-                    if (overlap !== -1) {
-                        // Remove the overlapping part
-                        const newPart = transcription.substring(overlap).trim();
-                        if (newPart) {
-                            this.addTranscription(newPart, true);
-                            this.pendingTranscription = this.pendingTranscription + ' ' + newPart;
-                        }
-                    } else {
-                        // No clear overlap found, add the whole transcription
-                        this.addTranscription(transcription, false);
-                        this.pendingTranscription = transcription;
-                    }
-                } else {
-                    // First transcription or after silence
-                    this.addTranscription(transcription, false);
-                    this.pendingTranscription = transcription;
-                }
-
-                // Keep only last 100 words for context
-                const words = this.pendingTranscription.split(' ');
-                if (words.length > 100) {
-                    this.pendingTranscription = words.slice(-100).join(' ');
-                }
-            }
-
-            findOverlapPoint(previous, current) {
-                // Word-based overlap detection
-                const prevWords = previous.toLowerCase().split(' ');
-                const currWords = current.toLowerCase().split(' ');
-                
-                // Look for the last few words of previous in current
-                for (let i = Math.min(10, prevWords.length); i >= 3; i--) {
-                    const lastWords = prevWords.slice(-i).join(' ');
-                    const index = current.toLowerCase().indexOf(lastWords);
-                    if (index !== -1) {
-                        return index + lastWords.length;
-                    }
-                }
-                
-                return -1;
             }
 
             monitorAudioLevel() {
@@ -701,28 +645,19 @@
                     const percentage = Math.min(100, rms * 500);
                     this.audioLevelBar.style.width = percentage + '%';
                     
-                    // Detect speech
-                    this.isSpeaking = percentage > 5;
-                    
-                    if (this.isSpeaking) {
-                        this.hasSpokenInChunk = true;
-                        this.lastSpeechTime = Date.now();
-                    }
-                    
-                    // Update debug info if needed
+                    // Update debug info
                     if (this.debugMode) {
-                        const bufferSize = this.continuousAudioData.length;
-                        const oldestTime = bufferSize > 0 ? 
-                            ((Date.now() - this.continuousAudioData[0].timestamp) / 1000).toFixed(1) : 0;
+                        const bufferDuration = this.audioBuffer.length > 0 ? 
+                            ((this.audioBuffer.length * 4096) / this.sampleRate).toFixed(1) : '0';
+                        const timeSinceSound = ((Date.now() - this.lastSoundTime) / 1000).toFixed(1);
+                        
                         this.updateDebugInfo(
                             `Audio Level: ${percentage.toFixed(1)}%\n` +
                             `RMS: ${rms.toFixed(4)}\n` +
-                            `Audio Context: ${this.audioContext.state}\n` +
-                            `Script Processor: ${this.scriptProcessor ? 'Connected' : 'Not connected'}\n` +
-                            `Speaking: ${this.isSpeaking}\n` +
-                            `Buffer: ${bufferSize} chunks (${oldestTime}s)\n` +
-                            `Pending context: ${this.pendingTranscription ? 
-                                this.pendingTranscription.split(' ').length + ' words' : 'none'}`
+                            `Buffer Duration: ${bufferDuration}s\n` +
+                            `Time Since Sound: ${timeSinceSound}s\n` +
+                            `Processing: ${this.isProcessing ? 'Yes' : 'No'}\n` +
+                            `Sample Rate: ${this.sampleRate}Hz`
                         );
                     }
                 } catch (error) {
@@ -740,15 +675,11 @@
 
                 this.isRecording = false;
                 
-                if (this.processingInterval) {
-                    clearInterval(this.processingInterval);
-                    this.processingInterval = null;
+                // Process any remaining audio
+                if (this.audioBuffer.length > 0 && this.hasSpokenInChunk) {
+                    this.processAudioBuffer();
                 }
-
-                if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
-                    this.mediaRecorder.stop();
-                }
-
+                
                 if (this.audioStream) {
                     this.audioStream.getTracks().forEach(track => track.stop());
                     this.audioStream = null;
@@ -776,29 +707,19 @@
                 }
 
                 // Clear audio data
-                this.continuousAudioData = [];
-                this.pendingTranscription = '';
-                this.lastTranscriptionEndTime = 0;
+                this.audioBuffer = [];
 
                 this.audioLevelBar.style.width = '0%';
                 this.updateStatus('Stopped', 'inactive');
                 this.updateDebugInfo('Recording stopped');
             }
 
-            addTranscription(text, isContinuation) {
+            addTranscription(text) {
                 const timestamp = new Date().toLocaleTimeString();
-                let formattedText;
-                
-                if (isContinuation && this.transcriptionHistory.length > 0) {
-                    // Add as continuation without timestamp
-                    formattedText = ` ${text.trim()}`;
-                } else {
-                    // Add with timestamp
-                    formattedText = `\n\n[${timestamp}] ${text.trim()}`;
-                }
+                const formattedText = `[${timestamp}] ${text.trim()}\n\n`;
                 
                 this.transcriptionHistory += formattedText;
-                this.transcriptionContent.textContent = this.transcriptionHistory.trim();
+                this.transcriptionContent.textContent = this.transcriptionHistory;
                 
                 // Auto-scroll to bottom
                 this.transcriptionContent.scrollTop = this.transcriptionContent.scrollHeight;
@@ -806,10 +727,7 @@
 
             clearTranscription() {
                 this.transcriptionHistory = '';
-                this.pendingTranscription = '';
-                this.transcriptionContent.textContent = this.isRecording ? 
-                    'Listening... (Speak naturally - I\'ll handle long sentences)' : 
-                    'Cleared. Start recording to see new transcriptions.';
+                this.transcriptionContent.textContent = this.isRecording ? 'Listening...' : 'Cleared. Start recording to see new transcriptions.';
             }
 
             updateStatus(text, state) {
@@ -820,6 +738,7 @@
             showError(message) {
                 this.errorMessage.textContent = message;
                 this.errorMessage.style.display = 'block';
+                setTimeout(() => this.hideError(), 5000);
             }
 
             hideError() {
