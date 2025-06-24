@@ -307,11 +307,11 @@
                 this.audioContext = null;
                 this.analyser = null;
                 this.microphone = null;
+                this.scriptProcessor = null;
                 this.hasSpokenInChunk = false;
                 this.chunkStartTime = null;
                 this.debugMode = false;
                 this.audioStream = null;
-                this.monitoringStarted = false;
                 
                 // Continuous recording variables
                 this.continuousAudioData = [];
@@ -431,34 +431,41 @@
                     // Setup audio context for level monitoring
                     this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
                     
-                    // Resume audio context if it's suspended (Chrome autoplay policy)
+                    // Resume if suspended
                     if (this.audioContext.state === 'suspended') {
                         await this.audioContext.resume();
                     }
                     
+                    // Create analyser and script processor
                     this.analyser = this.audioContext.createAnalyser();
-                    this.microphone = this.audioContext.createMediaStreamSource(stream);
-                    this.microphone.connect(this.analyser);
-                    
-                    // Setup analyser
                     this.analyser.fftSize = 1024;
                     this.analyser.smoothingTimeConstant = 0.3;
                     
-                    // Wait a moment for audio pipeline to be ready
+                    // Create script processor for processing
+                    this.scriptProcessor = this.audioContext.createScriptProcessor(2048, 1, 1);
+                    
+                    // Connect microphone -> analyser -> script processor -> destination
+                    this.microphone = this.audioContext.createMediaStreamSource(stream);
+                    this.microphone.connect(this.analyser);
+                    this.analyser.connect(this.scriptProcessor);
+                    this.scriptProcessor.connect(this.audioContext.destination);
+                    
+                    // Add script processor event listener to ensure processing
+                    this.scriptProcessor.onaudioprocess = () => {
+                        // This ensures the audio pipeline is active
+                    };
+                    
+                    // Small delay to ensure everything is connected
                     await new Promise(resolve => setTimeout(resolve, 100));
                     
-                    // Start monitoring audio levels only after everything is connected
-                    if (!this.monitoringStarted) {
-                        this.monitoringStarted = true;
-                        this.monitorAudioLevel();
-                    }
+                    // Start monitoring
+                    this.monitorAudioLevel();
 
-                    // Determine best mime type
+                    // Setup media recorder
                     const mimeType = 'audio/webm';
                     
                     this.updateDebugInfo(`Starting recording\nMime type: ${mimeType}\nAudio Context State: ${this.audioContext.state}`);
                     
-                    // Create media recorder
                     this.mediaRecorder = new MediaRecorder(stream, {
                         mimeType: mimeType
                     });
@@ -674,68 +681,64 @@
             monitorAudioLevel() {
                 if (!this.analyser || !this.isRecording || !this.audioContext) {
                     this.audioLevelBar.style.width = '0%';
-                    this.monitoringStarted = false;
                     return;
                 }
 
-                // Check if audio context is running
-                if (this.audioContext.state !== 'running') {
-                    this.audioContext.resume().then(() => {
-                        requestAnimationFrame(() => this.monitorAudioLevel());
-                    });
-                    return;
-                }
-
-                const bufferLength = this.analyser.fftSize;
-                const dataArray = new Uint8Array(bufferLength);
-                this.analyser.getByteTimeDomainData(dataArray);
-                
-                // Calculate RMS
-                let sum = 0;
-                for (let i = 0; i < bufferLength; i++) {
-                    const normalized = (dataArray[i] - 128) / 128;
-                    sum += normalized * normalized;
-                }
-                const rms = Math.sqrt(sum / bufferLength);
-                
-                // Convert to percentage
-                const percentage = Math.min(100, rms * 500);
-                this.audioLevelBar.style.width = percentage + '%';
-                
-                // Detect speech
-                const wasSpeaking = this.isSpeaking;
-                this.isSpeaking = percentage > 5;
-                
-                if (this.isSpeaking) {
-                    this.hasSpokenInChunk = true;
-                    this.lastSpeechTime = Date.now();
-                }
-                
-                // Update debug info if needed
-                if (this.debugMode) {
-                    const bufferSize = this.continuousAudioData.length;
-                    const oldestTime = bufferSize > 0 ? 
-                        ((Date.now() - this.continuousAudioData[0].timestamp) / 1000).toFixed(1) : 0;
-                    this.updateDebugInfo(
-                        `Audio Level: ${percentage.toFixed(1)}%\n` +
-                        `RMS: ${rms.toFixed(4)}\n` +
-                        `Audio Context: ${this.audioContext.state}\n` +
-                        `Speaking: ${this.isSpeaking}\n` +
-                        `Buffer: ${bufferSize} chunks (${oldestTime}s)\n` +
-                        `Pending context: ${this.pendingTranscription ? 
-                            this.pendingTranscription.split(' ').length + ' words' : 'none'}`
-                    );
+                try {
+                    const bufferLength = this.analyser.fftSize;
+                    const dataArray = new Uint8Array(bufferLength);
+                    this.analyser.getByteTimeDomainData(dataArray);
+                    
+                    // Calculate RMS
+                    let sum = 0;
+                    for (let i = 0; i < bufferLength; i++) {
+                        const normalized = (dataArray[i] - 128) / 128;
+                        sum += normalized * normalized;
+                    }
+                    const rms = Math.sqrt(sum / bufferLength);
+                    
+                    // Convert to percentage
+                    const percentage = Math.min(100, rms * 500);
+                    this.audioLevelBar.style.width = percentage + '%';
+                    
+                    // Detect speech
+                    this.isSpeaking = percentage > 5;
+                    
+                    if (this.isSpeaking) {
+                        this.hasSpokenInChunk = true;
+                        this.lastSpeechTime = Date.now();
+                    }
+                    
+                    // Update debug info if needed
+                    if (this.debugMode) {
+                        const bufferSize = this.continuousAudioData.length;
+                        const oldestTime = bufferSize > 0 ? 
+                            ((Date.now() - this.continuousAudioData[0].timestamp) / 1000).toFixed(1) : 0;
+                        this.updateDebugInfo(
+                            `Audio Level: ${percentage.toFixed(1)}%\n` +
+                            `RMS: ${rms.toFixed(4)}\n` +
+                            `Audio Context: ${this.audioContext.state}\n` +
+                            `Script Processor: ${this.scriptProcessor ? 'Connected' : 'Not connected'}\n` +
+                            `Speaking: ${this.isSpeaking}\n` +
+                            `Buffer: ${bufferSize} chunks (${oldestTime}s)\n` +
+                            `Pending context: ${this.pendingTranscription ? 
+                                this.pendingTranscription.split(' ').length + ' words' : 'none'}`
+                        );
+                    }
+                } catch (error) {
+                    console.error('Error in audio monitoring:', error);
                 }
                 
                 // Continue monitoring
-                requestAnimationFrame(() => this.monitorAudioLevel());
+                if (this.isRecording) {
+                    requestAnimationFrame(() => this.monitorAudioLevel());
+                }
             }
 
             stopRecording() {
                 if (!this.isRecording) return;
 
                 this.isRecording = false;
-                this.monitoringStarted = false;
                 
                 if (this.processingInterval) {
                     clearInterval(this.processingInterval);
@@ -749,6 +752,12 @@
                 if (this.audioStream) {
                     this.audioStream.getTracks().forEach(track => track.stop());
                     this.audioStream = null;
+                }
+
+                if (this.scriptProcessor) {
+                    this.scriptProcessor.disconnect();
+                    this.scriptProcessor.onaudioprocess = null;
+                    this.scriptProcessor = null;
                 }
 
                 if (this.microphone) {
