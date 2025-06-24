@@ -124,7 +124,7 @@
             border-color: #4CAF50;
         }
 
-        .save-key-btn {
+        .save-key-btn, .record-btn, .mode-toggle-btn {
             background-color: #4CAF50;
             color: white;
             border: none;
@@ -135,8 +135,30 @@
             transition: background-color 0.3s ease;
         }
 
-        .save-key-btn:hover {
+        .save-key-btn:hover, .record-btn:hover, .mode-toggle-btn:hover {
             background-color: #45a049;
+        }
+
+        .record-btn.recording {
+            background-color: #f44336;
+        }
+
+        .record-btn.recording:hover {
+            background-color: #d32f2f;
+        }
+
+        .mode-toggle-btn.on-demand {
+            background-color: #FF9800;
+        }
+
+        .mode-toggle-btn.on-demand:hover {
+            background-color: #F57C00;
+        }
+
+        .recording-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
 
         .transcription-area {
@@ -245,10 +267,16 @@
 
             .status-bar {
                 padding: 1rem;
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .recording-controls {
+                order: -1;
             }
 
             .transcription-area {
-                height: calc(100vh - 350px);
+                height: calc(100vh - 400px);
                 min-height: 300px;
             }
         }
@@ -267,6 +295,10 @@
                 <div class="audio-level">
                     <div class="audio-level-bar" id="audioLevelBar"></div>
                 </div>
+            </div>
+            <div class="recording-controls">
+                <button id="modeToggleBtn" class="mode-toggle-btn">Always-On</button>
+                <button id="recordBtn" class="record-btn" style="display: none;">🎙️ Record</button>
             </div>
             <div class="api-key-section">
                 <input 
@@ -300,6 +332,7 @@
         class WhisperTranscriber {
             constructor() {
                 this.apiKey = localStorage.getItem('openai_api_key') || '';
+                this.recordingMode = localStorage.getItem('recording_mode') || 'always-on'; // 'always-on' or 'on-demand'
                 this.mediaRecorder = null;
                 this.isRecording = false;
                 this.transcriptionHistory = '';
@@ -341,6 +374,8 @@
                 this.saveKeyBtn = document.getElementById('saveKeyBtn');
                 this.clearBtn = document.getElementById('clearBtn');
                 this.debugBtn = document.getElementById('debugBtn');
+                this.modeToggleBtn = document.getElementById('modeToggleBtn');
+                this.recordBtn = document.getElementById('recordBtn');
                 this.transcriptionContent = document.getElementById('transcriptionContent');
                 this.errorMessage = document.getElementById('errorMessage');
                 this.audioLevelBar = document.getElementById('audioLevelBar');
@@ -349,6 +384,8 @@
                 if (this.apiKey) {
                     this.apiKeyInput.value = this.apiKey;
                 }
+                
+                this.updateRecordingModeUI();
             }
 
             setupEventListeners() {
@@ -364,11 +401,19 @@
                 // Debug button
                 this.debugBtn.addEventListener('click', () => this.toggleDebug());
 
+                // Recording mode toggle
+                this.modeToggleBtn.addEventListener('click', () => this.toggleRecordingMode());
+                
+                // Manual record button
+                this.recordBtn.addEventListener('click', () => this.toggleRecording());
+
                 // Tab visibility
                 document.addEventListener('visibilitychange', () => {
                     if (document.hidden) {
-                        this.stopRecording();
-                    } else if (this.apiKey) {
+                        if (this.recordingMode === 'always-on') {
+                            this.stopRecording();
+                        }
+                    } else if (this.apiKey && this.recordingMode === 'always-on') {
                         if (this.isRecording && !this.monitoringStarted) {
                             this.monitoringStarted = true;
                             this.monitorAudioLevel();
@@ -379,14 +424,73 @@
 
                 // Window focus
                 window.addEventListener('focus', () => {
-                    if (this.apiKey && !this.isRecording) {
+                    if (this.apiKey && !this.isRecording && this.recordingMode === 'always-on') {
                         this.startRecording();
                     }
                 });
 
                 window.addEventListener('blur', () => {
-                    this.stopRecording();
+                    if (this.recordingMode === 'always-on') {
+                        this.stopRecording();
+                    }
                 });
+            }
+
+            toggleRecordingMode() {
+                this.recordingMode = this.recordingMode === 'always-on' ? 'on-demand' : 'always-on';
+                localStorage.setItem('recording_mode', this.recordingMode);
+                
+                // Stop current recording when switching modes
+                if (this.isRecording) {
+                    this.stopRecording();
+                }
+                
+                this.updateRecordingModeUI();
+                
+                // Auto-start recording if switching to always-on mode
+                if (this.recordingMode === 'always-on' && this.apiKey) {
+                    this.startRecording();
+                }
+            }
+
+            toggleRecording() {
+                if (this.recordingMode !== 'on-demand') return;
+                
+                if (!this.apiKey) {
+                    this.showError('Please enter your OpenAI API key first');
+                    return;
+                }
+                
+                if (this.isRecording) {
+                    this.stopRecording();
+                } else {
+                    this.startRecording();
+                }
+            }
+
+            updateRecordingModeUI() {
+                if (this.recordingMode === 'always-on') {
+                    this.modeToggleBtn.textContent = 'Always-On';
+                    this.modeToggleBtn.className = 'mode-toggle-btn';
+                    this.recordBtn.style.display = 'none';
+                } else {
+                    this.modeToggleBtn.textContent = 'On-Demand';
+                    this.modeToggleBtn.className = 'mode-toggle-btn on-demand';
+                    this.recordBtn.style.display = 'inline-block';
+                    this.updateRecordButtonState();
+                }
+            }
+
+            updateRecordButtonState() {
+                if (this.recordingMode === 'on-demand') {
+                    if (this.isRecording) {
+                        this.recordBtn.textContent = '⏹️ Stop';
+                        this.recordBtn.className = 'record-btn recording';
+                    } else {
+                        this.recordBtn.textContent = '🎙️ Record';
+                        this.recordBtn.className = 'record-btn';
+                    }
+                }
             }
 
             toggleDebug() {
@@ -403,7 +507,12 @@
 
             checkApiKey() {
                 if (this.apiKey) {
-                    this.startRecording();
+                    if (this.recordingMode === 'always-on') {
+                        this.startRecording();
+                    } else {
+                        this.updateStatus('Ready', 'inactive');
+                        this.transcriptionContent.textContent = 'On-demand mode. Click "Record" to start transcribing.';
+                    }
                 } else {
                     this.updateStatus('No API Key', 'error');
                     this.transcriptionContent.textContent = 'Please enter your OpenAI API key to start transcribing.';
@@ -420,8 +529,14 @@
                 this.apiKey = key;
                 localStorage.setItem('openai_api_key', key);
                 this.hideError();
-                this.transcriptionContent.textContent = 'API key saved. Starting transcription...';
-                this.startRecording();
+                
+                if (this.recordingMode === 'always-on') {
+                    this.transcriptionContent.textContent = 'API key saved. Starting transcription...';
+                    this.startRecording();
+                } else {
+                    this.transcriptionContent.textContent = 'API key saved. On-demand mode - click "Record" to start transcribing.';
+                    this.updateStatus('Ready', 'inactive');
+                }
             }
 
             async startRecording() {
@@ -501,6 +616,11 @@
                     this.isRecording = true;
                     this.updateStatus('Recording', 'active');
                     
+                    // Update record button state for on-demand mode
+                    if (this.recordingMode === 'on-demand') {
+                        this.updateRecordButtonState();
+                    }
+                    
                     // Start monitoring levels
                     if (!this.monitoringStarted) {
                         this.monitoringStarted = true;
@@ -517,6 +637,11 @@
                     console.error('Error accessing microphone:', error);
                     this.showError(`Failed to access microphone: ${error.message}`);
                     this.updateStatus('Error', 'error');
+                    
+                    // Reset record button state if recording failed to start
+                    if (this.recordingMode === 'on-demand') {
+                        this.updateRecordButtonState();
+                    }
                 }
             }
 
@@ -788,6 +913,11 @@
                 this.audioLevelBar.style.width = '0%';
                 this.updateStatus('Stopped', 'inactive');
                 this.updateDebugInfo('Recording stopped');
+                
+                // Update record button state for on-demand mode
+                if (this.recordingMode === 'on-demand') {
+                    this.updateRecordButtonState();
+                }
             }
 
             addTranscription(text) {
@@ -803,7 +933,13 @@
 
             clearTranscription() {
                 this.transcriptionHistory = '';
-                this.transcriptionContent.textContent = this.isRecording ? 'Listening...' : 'Cleared. Start recording to see new transcriptions.';
+                if (this.isRecording) {
+                    this.transcriptionContent.textContent = 'Listening...';
+                } else if (this.recordingMode === 'on-demand') {
+                    this.transcriptionContent.textContent = 'Cleared. Click "Record" to start transcribing.';
+                } else {
+                    this.transcriptionContent.textContent = 'Cleared. Start recording to see new transcriptions.';
+                }
             }
 
             updateStatus(text, state) {
