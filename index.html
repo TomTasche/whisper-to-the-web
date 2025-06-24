@@ -367,6 +367,10 @@
                 // Tab visibility
                 document.addEventListener('visibilitychange', () => {
                     if (document.hidden) {
+                        // Clear buffer immediately to avoid speech artifacts
+                        this.audioBuffer = [];
+                        this.speechStartTime = null;
+                        this.consecutiveSilentFrames = 0;
                         this.stopRecording();
                     } else if (this.apiKey) {
                         if (this.isRecording && !this.monitoringStarted) {
@@ -385,6 +389,10 @@
                 });
 
                 window.addEventListener('blur', () => {
+                    // Clear buffer immediately to avoid speech artifacts
+                    this.audioBuffer = [];
+                    this.speechStartTime = null;
+                    this.consecutiveSilentFrames = 0;
                     this.stopRecording();
                 });
             }
