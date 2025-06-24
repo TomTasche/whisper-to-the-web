@@ -311,6 +311,7 @@
                 this.chunkStartTime = null;
                 this.debugMode = false;
                 this.audioStream = null;
+                this.monitoringStarted = false;
                 
                 // Continuous recording variables
                 this.continuousAudioData = [];
@@ -429,6 +430,12 @@
                     
                     // Setup audio context for level monitoring
                     this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    
+                    // Resume audio context if it's suspended (Chrome autoplay policy)
+                    if (this.audioContext.state === 'suspended') {
+                        await this.audioContext.resume();
+                    }
+                    
                     this.analyser = this.audioContext.createAnalyser();
                     this.microphone = this.audioContext.createMediaStreamSource(stream);
                     this.microphone.connect(this.analyser);
@@ -437,10 +444,16 @@
                     this.analyser.fftSize = 1024;
                     this.analyser.smoothingTimeConstant = 0.3;
                     
-                    // Start monitoring audio levels
-                    this.monitorAudioLevel();
+                    // Wait a moment for audio pipeline to be ready
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    // Start monitoring audio levels only after everything is connected
+                    if (!this.monitoringStarted) {
+                        this.monitoringStarted = true;
+                        this.monitorAudioLevel();
+                    }
 
-                    // Determine best mime type - prefer webm as it's in the supported list
+                    // Determine best mime type
                     const mimeType = 'audio/webm';
                     
                     this.updateDebugInfo(`Starting recording\nMime type: ${mimeType}\nAudio Context State: ${this.audioContext.state}`);
@@ -659,8 +672,17 @@
             }
 
             monitorAudioLevel() {
-                if (!this.analyser || !this.isRecording) {
+                if (!this.analyser || !this.isRecording || !this.audioContext) {
                     this.audioLevelBar.style.width = '0%';
+                    this.monitoringStarted = false;
+                    return;
+                }
+
+                // Check if audio context is running
+                if (this.audioContext.state !== 'running') {
+                    this.audioContext.resume().then(() => {
+                        requestAnimationFrame(() => this.monitorAudioLevel());
+                    });
                     return;
                 }
 
@@ -690,12 +712,14 @@
                 }
                 
                 // Update debug info if needed
-                if (this.debugMode && this.isSpeaking) {
+                if (this.debugMode) {
                     const bufferSize = this.continuousAudioData.length;
                     const oldestTime = bufferSize > 0 ? 
                         ((Date.now() - this.continuousAudioData[0].timestamp) / 1000).toFixed(1) : 0;
                     this.updateDebugInfo(
                         `Audio Level: ${percentage.toFixed(1)}%\n` +
+                        `RMS: ${rms.toFixed(4)}\n` +
+                        `Audio Context: ${this.audioContext.state}\n` +
                         `Speaking: ${this.isSpeaking}\n` +
                         `Buffer: ${bufferSize} chunks (${oldestTime}s)\n` +
                         `Pending context: ${this.pendingTranscription ? 
@@ -711,6 +735,7 @@
                 if (!this.isRecording) return;
 
                 this.isRecording = false;
+                this.monitoringStarted = false;
                 
                 if (this.processingInterval) {
                     clearInterval(this.processingInterval);
