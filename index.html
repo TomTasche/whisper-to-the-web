@@ -181,6 +181,50 @@
             background-color: #555;
         }
 
+        .transcription-item {
+            border-bottom: 1px solid #333;
+            padding: 0.75rem 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+        }
+
+        .transcription-item:last-child {
+            border-bottom: none;
+        }
+
+        .transcription-text {
+            flex: 1;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .copy-btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 0.25rem 0.5rem;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: background-color 0.3s ease;
+            flex-shrink: 0;
+            min-width: 40px;
+            height: 24px;
+        }
+
+        .copy-btn:hover {
+            background-color: #45a049;
+        }
+
+        .copy-btn.copied {
+            background-color: #2196F3;
+        }
+
         .transcription-content {
             background-color: #1a1a1a;
             border: 1px solid #444;
@@ -188,11 +232,6 @@
             padding: 1rem;
             flex: 1;
             overflow-y: auto;
-            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-            font-size: 0.95rem;
-            line-height: 1.6;
-            white-space: pre-wrap;
-            word-wrap: break-word;
         }
 
         .transcription-content::-webkit-scrollbar {
@@ -302,7 +341,6 @@
                 this.apiKey = localStorage.getItem('openai_api_key') || '';
                 this.mediaRecorder = null;
                 this.isRecording = false;
-                this.transcriptionHistory = '';
                 this.audioContext = null;
                 this.analyser = null;
                 this.microphone = null;
@@ -509,7 +547,7 @@
                         }, 100);
                     }
                     
-                    if (this.transcriptionHistory === '') {
+                    if (this.transcriptionContent.children.length === 0) {
                         this.transcriptionContent.textContent = 'Listening...';
                     }
 
@@ -792,18 +830,85 @@
 
             addTranscription(text) {
                 const timestamp = new Date().toLocaleTimeString();
-                const formattedText = `[${timestamp}] ${text}\n\n`;
                 
-                this.transcriptionHistory += formattedText;
-                this.transcriptionContent.textContent = this.transcriptionHistory;
+                // Create transcription item element
+                const transcriptionItem = document.createElement('div');
+                transcriptionItem.className = 'transcription-item';
+                
+                // Create text element
+                const transcriptionText = document.createElement('div');
+                transcriptionText.className = 'transcription-text';
+                transcriptionText.textContent = `[${timestamp}] ${text}`;
+                
+                // Create copy button
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'copy-btn';
+                copyBtn.textContent = 'Copy';
+                copyBtn.addEventListener('click', () => this.copyToClipboard(text, copyBtn));
+                
+                // Assemble the item
+                transcriptionItem.appendChild(transcriptionText);
+                transcriptionItem.appendChild(copyBtn);
+                
+                // Add to transcription content
+                this.transcriptionContent.appendChild(transcriptionItem);
                 
                 // Auto-scroll to bottom
                 this.transcriptionContent.scrollTop = this.transcriptionContent.scrollHeight;
             }
 
+            async copyToClipboard(text, button) {
+                try {
+                    await navigator.clipboard.writeText(text);
+                    
+                    // Provide visual feedback
+                    const originalText = button.textContent;
+                    button.textContent = '✓';
+                    button.classList.add('copied');
+                    
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.classList.remove('copied');
+                    }, 1500);
+                    
+                } catch (error) {
+                    console.error('Failed to copy text:', error);
+                    
+                    // Fallback for older browsers
+                    const textArea = document.createElement('textarea');
+                    textArea.value = text;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    
+                    try {
+                        document.execCommand('copy');
+                        
+                        // Provide visual feedback
+                        const originalText = button.textContent;
+                        button.textContent = '✓';
+                        button.classList.add('copied');
+                        
+                        setTimeout(() => {
+                            button.textContent = originalText;
+                            button.classList.remove('copied');
+                        }, 1500);
+                        
+                    } catch (fallbackError) {
+                        console.error('Fallback copy failed:', fallbackError);
+                        this.showError('Failed to copy text to clipboard');
+                    } finally {
+                        document.body.removeChild(textArea);
+                    }
+                }
+            }
+
             clearTranscription() {
-                this.transcriptionHistory = '';
-                this.transcriptionContent.textContent = this.isRecording ? 'Listening...' : 'Cleared. Start recording to see new transcriptions.';
+                this.transcriptionContent.innerHTML = '';
+                if (this.isRecording) {
+                    this.transcriptionContent.textContent = 'Listening...';
+                } else {
+                    this.transcriptionContent.textContent = 'Cleared. Start recording to see new transcriptions.';
+                }
             }
 
             updateStatus(text, state) {
